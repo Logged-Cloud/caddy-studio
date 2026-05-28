@@ -74,6 +74,10 @@ class CaddyStudioServiceProvider extends ServiceProvider
 
         $this->registerBuiltinNodes();
         $this->registerDriftSchedule();
+
+        if (class_exists(\Livewire\Livewire::class) && $this->app->bound('livewire')) {
+            \Livewire\Livewire::component('caddy-studio.caddy-builder', \LoggedCloud\CaddyStudio\Livewire\CaddyBuilder::class);
+        }
     }
 
     protected function registerDriftSchedule(): void
