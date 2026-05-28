@@ -9,11 +9,30 @@ class CaddyStudioServiceProvider extends ServiceProvider
 {
     /** @var array<int, class-string<Nodes\CaddyNodeType>> */
     protected array $builtinNodes = [
+        // Core
         Nodes\Builtin\ServerNode::class,
         Nodes\Builtin\RouteHostNode::class,
         Nodes\Builtin\UpstreamNode::class,
         Nodes\Builtin\LoadBalancerNode::class,
         Nodes\Builtin\RedirectNode::class,
+        // Matchers
+        Nodes\Builtin\PathMatcherNode::class,
+        Nodes\Builtin\MethodMatcherNode::class,
+        Nodes\Builtin\HeaderMatcherNode::class,
+        Nodes\Builtin\QueryMatcherNode::class,
+        // Terminal handlers
+        Nodes\Builtin\FileServerNode::class,
+        Nodes\Builtin\StaticResponseNode::class,
+        Nodes\Builtin\FastcgiNode::class,
+        Nodes\Builtin\SubrouteNode::class,
+        // Middleware
+        Nodes\Builtin\EncodeNode::class,
+        Nodes\Builtin\HeadersNode::class,
+        Nodes\Builtin\RewriteNode::class,
+        Nodes\Builtin\BasicAuthNode::class,
+        Nodes\Builtin\RateLimitNode::class,
+        // TLS
+        Nodes\Builtin\TlsDuckdnsNode::class,
     ];
 
     public function register(): void

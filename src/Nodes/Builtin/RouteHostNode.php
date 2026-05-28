@@ -44,6 +44,15 @@ class RouteHostNode extends CaddyNodeType
         ];
     }
 
+    public static function outputs(): array
+    {
+        // Wire this into a Subroute to make it an inner route instead of a
+        // top-level one.
+        return [
+            'route' => ['label' => 'As inner route', 'type' => 'caddy.route'],
+        ];
+    }
+
     public static function settings(): array
     {
         return [
