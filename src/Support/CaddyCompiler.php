@@ -3,44 +3,46 @@
 namespace LoggedCloud\CaddyStudio\Support;
 
 /**
- * Compiles a node graph into the Caddy admin-API routes JSON.
+ * Compiles a node graph into the Caddy admin-API routes JSON (and TLS
+ * automation policies).
  *
- * Graph shape (the same shape the editor saves):
- *   $nodes = [
- *     ['id' => 's',  'type' => 'server',     'settings' => ['listen' => ':443']],
- *     ['id' => 'r',  'type' => 'route.host', 'settings' => ['hosts' => 'studio.logged.cloud', 'terminal' => true]],
- *     ['id' => 'u',  'type' => 'upstream',   'settings' => ['dial' => '10.0.0.200:8107']],
- *   ];
- *   $edges = [
- *     ['from_node' => 'u', 'from_socket' => 'upstream', 'to_node' => 'r', 'to_socket' => 'target'],
- *   ];
+ * Each `route.host` node becomes one Caddy route unless it is wired into a
+ * Subroute (then it is an inner route of that subroute). A route's `handle`
+ * is the chain produced by walking its `target` input:
  *
- * Each `route.host` node becomes one top-level Caddy route. Its handler is
- * resolved by following the wire into its `target` input:
- *   - an `upstream` node          → reverse_proxy with one backend
- *   - an `lb` (load balancer) node → reverse_proxy with a policy + many backends
- *   - a `redirect` node            → static_response
+ *   route.target → encode → headers → reverse_proxy(upstream)
+ *   compiles to   handle: [encode, headers, reverse_proxy]
+ *
+ * Terminal handlers (upstream, lb, redirect, file_server, static_response,
+ * fastcgi, subroute) end a chain. Middleware handlers (encode, headers,
+ * rewrite, basic_auth, rate_limit) have a `next` input and prepend themselves
+ * to whatever that resolves to.
+ *
+ * Matcher nodes (path/method/header/query) wired into a route's `matchers`
+ * input merge into the route's match object alongside its host list.
  */
 class CaddyCompiler
 {
+    protected const TERMINALS = ['upstream', 'lb', 'redirect', 'file_server', 'static_response', 'fastcgi', 'subroute'];
+    protected const MIDDLEWARE = ['encode', 'headers', 'rewrite', 'basic_auth', 'rate_limit'];
+
     /**
      * @param  array<int, array<string, mixed>>  $nodes
      * @param  array<int, array<string, mixed>>  $edges
-     * @return array<int, array<string, mixed>>  Caddy routes
+     * @return array<int, array<string, mixed>>
      */
     public static function compile(array $nodes, array $edges): array
     {
-        $byId = [];
-        foreach ($nodes as $n) {
-            if (! empty($n['id'])) {
-                $byId[$n['id']] = $n;
-            }
-        }
+        $byId = self::index($nodes);
+        $inner = self::innerRouteIds($byId, $edges);
 
         $routes = [];
         foreach ($nodes as $node) {
             if (($node['type'] ?? null) !== 'route.host') {
                 continue;
+            }
+            if (in_array($node['id'] ?? null, $inner, true)) {
+                continue; // belongs to a subroute, not the top level
             }
             $route = self::compileRoute($node, $byId, $edges);
             if ($route !== null) {
@@ -52,7 +54,7 @@ class CaddyCompiler
     }
 
     /**
-     * Full server object for apps.http.servers.<server> · listen + routes.
+     * Full server object for apps.http.servers.<server>.
      *
      * @return array<string, mixed>
      */
@@ -73,31 +75,44 @@ class CaddyCompiler
     }
 
     /**
-     * @param  array<string, array<string, mixed>>  $byId
-     * @param  array<int, array<string, mixed>>  $edges
-     * @return array<string, mixed>|null
+     * TLS automation policies from `tls.*` nodes. Empty when none · Caddy then
+     * falls back to its default HTTP-01 issuer for every host.
+     *
+     * @return array<int, array<string, mixed>>
      */
+    public static function compileTls(array $nodes, array $edges): array
+    {
+        $policies = [];
+        foreach ($nodes as $node) {
+            $policy = match ($node['type'] ?? null) {
+                'tls.duckdns' => self::duckdnsPolicy($node),
+                default       => null,
+            };
+            if ($policy !== null) {
+                $policies[] = $policy;
+            }
+        }
+
+        return $policies;
+    }
+
+    // ---- routes -----------------------------------------------------------
+
     protected static function compileRoute(array $node, array $byId, array $edges): ?array
     {
-        $settings = (array) ($node['settings'] ?? []);
-
-        $hosts = array_values(array_filter(array_map(
-            'trim',
-            explode(',', (string) ($settings['hosts'] ?? ''))
-        )));
-
-        $handle = self::resolveHandler($node['id'], $byId, $edges);
-        if ($handle === null) {
+        $handle = self::resolveChain($node['id'], 'target', $byId, $edges);
+        if ($handle === []) {
             return null;
         }
 
         $route = [];
-        if ($hosts !== []) {
-            $route['match'] = [['host' => $hosts]];
+        $match = self::resolveMatch($node, $byId, $edges);
+        if ($match !== []) {
+            $route['match'] = [$match];
         }
-        $route['handle'] = [$handle];
+        $route['handle'] = $handle;
 
-        if (($settings['terminal'] ?? true)) {
+        if ((($node['settings'] ?? [])['terminal'] ?? true)) {
             $route['terminal'] = true;
         }
 
@@ -105,60 +120,162 @@ class CaddyCompiler
     }
 
     /**
-     * Follow the wire into a route's `target` input and build the handler.
+     * The match object for a route · host list (from settings) merged with
+     * every wired matcher node.
      *
-     * @return array<string, mixed>|null
+     * @return array<string, mixed>
      */
-    protected static function resolveHandler(string $routeId, array $byId, array $edges): ?array
+    protected static function resolveMatch(array $route, array $byId, array $edges): array
     {
-        $source = self::sourceNode($routeId, 'target', $byId, $edges);
-        if ($source === null) {
-            return null;
+        $match = [];
+
+        $hosts = array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) (($route['settings'] ?? [])['hosts'] ?? ''))
+        )));
+        if ($hosts !== []) {
+            $match['host'] = $hosts;
         }
 
-        return match ($source['type'] ?? null) {
+        foreach (self::sourceNodes($route['id'], 'matchers', $byId, $edges) as $m) {
+            $match = array_merge($match, self::matcherFragment($m));
+        }
+
+        return $match;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected static function matcherFragment(array $node): array
+    {
+        $s = (array) ($node['settings'] ?? []);
+
+        return match ($node['type'] ?? null) {
+            'matcher.path'   => ['path' => self::splitList($s['paths'] ?? '')],
+            'matcher.method' => ['method' => array_map('strtoupper', self::splitList($s['methods'] ?? ''))],
+            'matcher.header' => ['header' => [(string) ($s['name'] ?? '') => [(string) ($s['value'] ?? '')]]],
+            'matcher.query'  => ['query' => [(string) ($s['key'] ?? '') => [(string) ($s['value'] ?? '')]]],
+            default          => [],
+        };
+    }
+
+    // ---- handler chain ----------------------------------------------------
+
+    /**
+     * Walk from ($toNode, $toSocket) and build the ordered handle array.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected static function resolveChain(string $toNode, string $toSocket, array $byId, array $edges): array
+    {
+        $source = self::sourceNode($toNode, $toSocket, $byId, $edges);
+        if ($source === null) {
+            return [];
+        }
+
+        $type = $source['type'] ?? null;
+
+        if (in_array($type, self::MIDDLEWARE, true)) {
+            return array_merge(
+                [self::middlewareHandler($source)],
+                self::resolveChain($source['id'], 'next', $byId, $edges),
+            );
+        }
+
+        $terminal = self::terminalHandler($source, $byId, $edges);
+
+        return $terminal === null ? [] : [$terminal];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    protected static function terminalHandler(array $node, array $byId, array $edges): ?array
+    {
+        return match ($node['type'] ?? null) {
             'upstream' => self::reverseProxy(
-                [self::upstreamDial($source)],
-                self::needsTls([$source]) ? $source : null,
+                [self::dial($node)],
+                self::needsTls([$node]) ? $node : null,
             ),
-            'lb' => self::loadBalancedProxy($source, $byId, $edges),
-            'redirect' => self::redirect($source),
-            default => null,
+            'lb'              => self::loadBalancedProxy($node, $byId, $edges),
+            'redirect'        => self::redirect($node),
+            'file_server'     => self::fileServer($node),
+            'static_response' => self::staticResponse($node),
+            'fastcgi'         => self::fastcgi($node),
+            'subroute'        => self::subroute($node, $byId, $edges),
+            default           => null,
         };
     }
 
     /**
      * @return array<string, mixed>
      */
+    protected static function middlewareHandler(array $node): array
+    {
+        $s = (array) ($node['settings'] ?? []);
+
+        return match ($node['type'] ?? null) {
+            'encode' => [
+                'handler'   => 'encode',
+                'encodings' => self::encodings($s),
+            ],
+            'headers' => [
+                'handler'  => 'headers',
+                'response' => ['set' => [(string) ($s['name'] ?? '') => [(string) ($s['value'] ?? '')]]],
+            ],
+            'rewrite' => [
+                'handler' => 'rewrite',
+                'uri'     => (string) ($s['uri'] ?? ''),
+            ],
+            'basic_auth' => [
+                'handler'   => 'authentication',
+                'providers' => ['http_basic' => ['accounts' => [[
+                    'username' => (string) ($s['username'] ?? ''),
+                    'password' => (string) ($s['password_hash'] ?? ''),
+                ]]]],
+            ],
+            'rate_limit' => [
+                'handler' => 'rate_limit',
+                'rate'    => (string) ($s['rate'] ?? '100r/m'),
+            ],
+            default => ['handler' => 'static_response', 'status_code' => 500],
+        };
+    }
+
+    // ---- terminal handlers ------------------------------------------------
+
     protected static function loadBalancedProxy(array $lb, array $byId, array $edges): array
     {
         $upstreamNodes = self::sourceNodes($lb['id'], 'upstreams', $byId, $edges);
-        $dials = array_map(fn ($u) => self::upstreamDial($u), $upstreamNodes);
-
-        $policy = (string) ($lb['settings']['policy'] ?? 'round_robin');
+        $dials = array_map(fn ($u) => self::dial($u), $upstreamNodes);
 
         $proxy = self::reverseProxy(
             $dials,
-            self::needsTls($upstreamNodes) ? $upstreamNodes[0] : null,
+            self::needsTls($upstreamNodes) ? ($upstreamNodes[0] ?? null) : null,
         );
-        $proxy['load_balancing'] = ['selection_policy' => ['policy' => $policy]];
+        $proxy['load_balancing'] = ['selection_policy' => ['policy' => (string) ($lb['settings']['policy'] ?? 'round_robin')]];
+
+        $s = (array) ($lb['settings'] ?? []);
+        if (! empty($s['health_path'])) {
+            $proxy['health_checks'] = ['active' => array_filter([
+                'path'     => (string) $s['health_path'],
+                'interval' => (string) ($s['health_interval'] ?? '30s'),
+            ])];
+        }
 
         return $proxy;
     }
 
     /**
      * @param  array<int, string>  $dials
-     * @return array<string, mixed>
      */
     protected static function reverseProxy(array $dials, ?array $tlsSource): array
     {
         $proxy = ['handler' => 'reverse_proxy'];
 
         if ($tlsSource !== null) {
-            $proxy['transport'] = [
-                'protocol' => 'http',
-                'tls'      => ['insecure_skip_verify' => true],
-            ];
+            $proxy['transport'] = ['protocol' => 'http', 'tls' => ['insecure_skip_verify' => true]];
         }
 
         $proxy['upstreams'] = array_values(array_map(
@@ -169,22 +286,101 @@ class CaddyCompiler
         return $proxy;
     }
 
-    /**
-     * @return array<string, mixed>
-     */
     protected static function redirect(array $node): array
     {
-        $to = (string) ($node['settings']['to'] ?? '');
-        $status = (int) ($node['settings']['status'] ?? 308);
-
         return [
             'handler'     => 'static_response',
-            'status_code' => $status,
-            'headers'     => ['Location' => [$to]],
+            'status_code' => (int) ($node['settings']['status'] ?? 308),
+            'headers'     => ['Location' => [(string) ($node['settings']['to'] ?? '')]],
         ];
     }
 
-    protected static function upstreamDial(array $upstream): string
+    protected static function fileServer(array $node): array
+    {
+        $s = (array) ($node['settings'] ?? []);
+        $h = ['handler' => 'file_server', 'root' => (string) ($s['root'] ?? '')];
+        if (! empty($s['browse'])) {
+            $h['browse'] = new \stdClass();
+        }
+
+        return $h;
+    }
+
+    protected static function staticResponse(array $node): array
+    {
+        $s = (array) ($node['settings'] ?? []);
+        $h = ['handler' => 'static_response', 'status_code' => (int) ($s['status'] ?? 200)];
+        if (($s['body'] ?? '') !== '') {
+            $h['body'] = (string) $s['body'];
+        }
+
+        return $h;
+    }
+
+    protected static function fastcgi(array $node): array
+    {
+        $s = (array) ($node['settings'] ?? []);
+
+        return [
+            'handler'   => 'reverse_proxy',
+            'transport' => ['protocol' => 'fastcgi', 'split_path' => ['.php']],
+            'upstreams' => [['dial' => trim((string) ($s['dial'] ?? ''))]],
+        ];
+    }
+
+    protected static function subroute(array $node, array $byId, array $edges): array
+    {
+        $routes = [];
+        foreach (self::sourceNodes($node['id'], 'routes', $byId, $edges) as $inner) {
+            if (($inner['type'] ?? null) !== 'route.host') {
+                continue;
+            }
+            $route = self::compileRoute($inner, $byId, $edges);
+            if ($route !== null) {
+                // Inner routes of a subroute are not themselves terminal by
+                // default · let the order + matchers decide the fallthrough.
+                unset($route['terminal']);
+                $routes[] = $route;
+            }
+        }
+
+        return ['handler' => 'subroute', 'routes' => $routes];
+    }
+
+    // ---- tls --------------------------------------------------------------
+
+    protected static function duckdnsPolicy(array $node): array
+    {
+        $s = (array) ($node['settings'] ?? []);
+
+        return [
+            'subjects' => self::splitList($s['subjects'] ?? ''),
+            'issuers'  => [[
+                'module'     => 'acme',
+                'challenges' => ['dns' => ['provider' => [
+                    'name'      => 'duckdns',
+                    'api_token' => (string) ($s['api_token'] ?? ''),
+                ]]],
+            ]],
+        ];
+    }
+
+    // ---- helpers ----------------------------------------------------------
+
+    /** @return array<string, mixed> */
+    protected static function encodings(array $s): array
+    {
+        $out = [];
+        foreach (['gzip', 'zstd'] as $enc) {
+            if (! array_key_exists($enc, $s) || $s[$enc]) {
+                $out[$enc] = new \stdClass();
+            }
+        }
+
+        return $out === [] ? ['gzip' => new \stdClass()] : $out;
+    }
+
+    protected static function dial(array $upstream): string
     {
         return trim((string) ($upstream['settings']['dial'] ?? ''));
     }
@@ -201,11 +397,44 @@ class CaddyCompiler
         return false;
     }
 
+    /** @return array<int, string> */
+    protected static function splitList(string $csv): array
+    {
+        return array_values(array_filter(array_map('trim', explode(',', $csv))));
+    }
+
+    /** @return array<string, array<string, mixed>> */
+    protected static function index(array $nodes): array
+    {
+        $byId = [];
+        foreach ($nodes as $n) {
+            if (! empty($n['id'])) {
+                $byId[$n['id']] = $n;
+            }
+        }
+
+        return $byId;
+    }
+
     /**
-     * The single node wired into ($toNode, $toSocket), or null.
+     * Ids of route.host nodes that are wired into a subroute (so they are inner
+     * routes, not top-level ones).
      *
-     * @return array<string, mixed>|null
+     * @return array<int, string>
      */
+    protected static function innerRouteIds(array $byId, array $edges): array
+    {
+        $ids = [];
+        foreach ($edges as $e) {
+            $to = $byId[$e['to_node'] ?? ''] ?? null;
+            if (($to['type'] ?? null) === 'subroute' && ($e['to_socket'] ?? null) === 'routes') {
+                $ids[] = $e['from_node'] ?? null;
+            }
+        }
+
+        return array_values(array_filter($ids));
+    }
+
     protected static function sourceNode(string $toNode, string $toSocket, array $byId, array $edges): ?array
     {
         foreach ($edges as $e) {
@@ -218,9 +447,6 @@ class CaddyCompiler
     }
 
     /**
-     * Every node wired into ($toNode, $toSocket), preserving node declaration
-     * order for stable output.
-     *
      * @return array<int, array<string, mixed>>
      */
     protected static function sourceNodes(string $toNode, string $toSocket, array $byId, array $edges): array

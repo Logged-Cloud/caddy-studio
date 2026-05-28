@@ -9,7 +9,13 @@ uses(TestCase::class);
 it('registers the builtin nodes on boot', function () {
     $library = NodeRegistry::library();
 
-    expect($library)->toHaveKeys(['server', 'route.host', 'upstream', 'lb', 'redirect']);
+    expect($library)->toHaveKeys([
+        'server', 'route.host', 'upstream', 'lb', 'redirect',
+        'matcher.path', 'matcher.method', 'matcher.header', 'matcher.query',
+        'file_server', 'static_response', 'fastcgi', 'subroute',
+        'encode', 'headers', 'rewrite', 'basic_auth', 'rate_limit',
+        'tls.duckdns',
+    ]);
 });
 
 it('populates the load balancer policy options from config', function () {
