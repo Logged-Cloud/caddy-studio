@@ -48,41 +48,68 @@
     .cs-drift--ok   { background: rgba(22,163,74,.15);  color: #86efac; }
     .cs-drift--warn { background: rgba(245,158,11,.15); color: #fde68a; }
 
+    [x-cloak] { display: none !important; }
+
     .cs-body { display: flex; flex: 1; min-height: 0; }
 
-    .cs-palette {
-        width: 190px;
-        flex-shrink: 0;
+    /* ---- weapon wheel (node picker) ---- */
+    .cs-wheel {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        z-index: 50;
         background: var(--cs-surface-2);
-        border-right: 1px solid var(--cs-line);
-        overflow-y: auto;
-        padding: .5rem;
+        border: 1px solid var(--cs-line);
+        border-radius: .6rem;
+        box-shadow: 0 12px 34px rgba(0,0,0,.55);
+        overflow: hidden;
     }
-    .cs-palette-group {
-        margin: .6rem 0 .3rem;
-        font-size: .62rem;
-        text-transform: uppercase;
-        letter-spacing: .08em;
-        color: var(--cs-ink-dim);
+    .cs-wheel-groups {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 2px;
+        padding: 4px;
+        width: 240px;
     }
-    .cs-palette-item {
+    .cs-wheel-slice {
         display: flex;
+        flex-direction: column;
         align-items: center;
-        gap: .45rem;
-        width: 100%;
+        gap: .15rem;
+        padding: .55rem .3rem;
         background: var(--cs-surface);
         border: 1px solid var(--cs-line);
+        border-radius: .4rem;
         color: var(--cs-ink);
-        border-radius: .3rem;
-        padding: .3rem .45rem;
-        margin-bottom: .25rem;
         cursor: pointer;
         font: inherit;
-        font-size: .78rem;
-        text-align: left;
     }
-    .cs-palette-item:hover { background: rgba(255,255,255,.06); }
-    .cs-palette-icon { width: 1.1rem; text-align: center; }
+    .cs-wheel-slice:hover { background: rgba(255,255,255,.07); }
+    .cs-wheel-slice-icon { font-size: 1.15rem; }
+    .cs-wheel-slice-label { font-size: .62rem; text-transform: uppercase; letter-spacing: .05em; color: var(--cs-ink-dim); }
+    .cs-wheel-slice--server   { border-color: rgba(99,102,241,.5); }
+    .cs-wheel-slice--route    { border-color: rgba(6,182,212,.5); }
+    .cs-wheel-slice--upstream { border-color: rgba(225,29,72,.5); }
+    .cs-wheel-slice--handler  { border-color: rgba(44,102,232,.5); }
+    .cs-wheel-slice--matcher  { border-color: rgba(245,158,11,.5); }
+    .cs-wheel-slice--tls      { border-color: rgba(168,85,247,.5); }
+
+    .cs-wheel-list { width: 220px; max-height: 260px; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+    .cs-wheel-bar {
+        display: flex; align-items: center; gap: .4rem;
+        padding: .25rem .35rem .4rem;
+        font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--cs-ink-dim);
+    }
+    .cs-wheel-back {
+        background: var(--cs-surface); border: 1px solid var(--cs-line); color: var(--cs-ink);
+        border-radius: .3rem; cursor: pointer; padding: 0 .45rem; font-size: .9rem; line-height: 1.4;
+    }
+    .cs-wheel-item {
+        display: flex; align-items: center; gap: .5rem; width: 100%;
+        background: transparent; border: 0; color: var(--cs-ink);
+        border-radius: .3rem; padding: .35rem .45rem; cursor: pointer; font: inherit; font-size: .78rem; text-align: left;
+    }
+    .cs-wheel-item:hover { background: rgba(255,255,255,.07); }
+    .cs-wheel-item-icon { width: 1.1rem; text-align: center; }
 
     .cs-canvas {
         position: relative;

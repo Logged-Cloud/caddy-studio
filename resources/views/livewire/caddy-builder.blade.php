@@ -1,6 +1,6 @@
 @php($palette = $this->palette)
 <div class="cs-root"
-     x-data="caddyBuilder()"
+     x-data="caddyBuilder(@js($palette))"
      x-init="init()"
      wire:ignore.self>
     @include('caddy-studio::livewire._caddy-builder-styles')
@@ -13,6 +13,7 @@
         @if($status)
             <span class="cs-status">{{ $status }}</span>
         @endif
+        <button class="cs-btn" @click="resetView()" title="Recentre the canvas">Recentre</button>
         <button class="cs-btn" wire:click="refreshDrift" wire:loading.attr="disabled">Check drift</button>
         <button class="cs-btn cs-btn--primary" wire:click="apply" wire:loading.attr="disabled"
                 wire:confirm="Push this graph live to Caddy?">Apply</button>
@@ -33,27 +34,15 @@
     @endif
 
     <div class="cs-body">
-        {{-- Palette --}}
-        <aside class="cs-palette">
-            @foreach($palette as $group => $entries)
-                <h4 class="cs-palette-group">{{ $group }}</h4>
-                @foreach($entries as $key => $entry)
-                    <button type="button" class="cs-palette-item"
-                            wire:click="addNode('{{ $key }}')"
-                            title="{{ $entry['description'] ?? '' }}">
-                        <span class="cs-palette-icon">{!! $entry['icon'] !!}</span>
-                        <span>{{ $entry['label'] }}</span>
-                    </button>
-                @endforeach
-            @endforeach
-        </aside>
-
-        {{-- Canvas --}}
+        {{-- Canvas (full width · no palette · right-click / long-press for the node wheel) --}}
         <div class="cs-canvas" x-ref="canvas"
              @pointerdown="onCanvasDown($event)"
              @pointermove="onPointerMove($event)"
-             @pointerup="onPointerUp($event)">
-            <div class="cs-world" x-ref="world" :style="`transform: translate(${pan.x}px, ${pan.y}px)`">
+             @pointerup="onPointerUp($event)"
+             @pointercancel="onPointerUp($event)"
+             @wheel.prevent="onWheel($event)"
+             @contextmenu.prevent="openWheel($event)">
+            <div class="cs-world" x-ref="world" :style="`transform: translate(${pan.x}px, ${pan.y}px) scale(${zoom})`">
                 <svg class="cs-wires" x-ref="wires"></svg>
 
                 @foreach($nodes as $i => $node)
@@ -118,8 +107,41 @@
             </div>
 
             @if(count($nodes) === 0)
-                <div class="cs-empty">Add a node from the palette to begin.</div>
+                <div class="cs-empty">Right-click (or long-press) the canvas to add a node.</div>
             @endif
+
+            {{-- Weapon wheel · node picker --}}
+            <div class="cs-wheel" x-show="wheel.open" x-cloak
+                 :style="`left:${wheel.sx}px; top:${wheel.sy}px`"
+                 @pointerdown.stop @click.outside="closeWheel()">
+                {{-- Stage 1 · group donut --}}
+                <template x-if="!wheel.group">
+                    <div class="cs-wheel-groups">
+                        <template x-for="(g, name) in groups" :key="name">
+                            <button type="button" class="cs-wheel-slice" :class="`cs-wheel-slice--${name}`"
+                                    @click.stop="wheel.group = name">
+                                <span class="cs-wheel-slice-icon" x-text="g.icon"></span>
+                                <span class="cs-wheel-slice-label" x-text="name"></span>
+                            </button>
+                        </template>
+                    </div>
+                </template>
+                {{-- Stage 2 · node list for the chosen group --}}
+                <template x-if="wheel.group">
+                    <div class="cs-wheel-list">
+                        <div class="cs-wheel-bar">
+                            <button type="button" class="cs-wheel-back" @click.stop="wheel.group = null">‹</button>
+                            <span x-text="wheel.group"></span>
+                        </div>
+                        <template x-for="(entry, key) in groups[wheel.group].nodes" :key="key">
+                            <button type="button" class="cs-wheel-item" @click.stop="pick(key)">
+                                <span class="cs-wheel-item-icon" x-html="entry.icon"></span>
+                                <span class="cs-wheel-item-label" x-text="entry.label"></span>
+                            </button>
+                        </template>
+                    </div>
+                </template>
+            </div>
         </div>
     </div>
 
